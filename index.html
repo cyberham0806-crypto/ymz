@@ -1,0 +1,434 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Merry Christmas Interactive Tree</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Noto+Serif+SC:wght@300;500&display=swap" rel="stylesheet">
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #020805;
+        font-family: 'Cinzel', serif;
+      }
+      .font-chinese {
+        font-family: 'Noto Serif SC', serif;
+      }
+      #root {
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+    <!-- Dependencies via CDN -->
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.0.0",
+    "react-dom": "https://esm.sh/react-dom@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+    "three": "https://esm.sh/three@0.170.0",
+    "@react-three/fiber": "https://esm.sh/@react-three/fiber@9.0.0",
+    "@react-three/drei": "https://esm.sh/@react-three/drei@10.0.0",
+    "@react-three/postprocessing": "https://esm.sh/@react-three/postprocessing@3.0.0",
+    "postprocessing": "https://esm.sh/postprocessing@6.36.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/"
+  }
+}
+</script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+      import React, { useState, useMemo, useRef, useEffect, Suspense } from 'react';
+      import ReactDOM from 'react-dom/client';
+      import * as THREE from 'three';
+      import { Canvas, useFrame } from '@react-three/fiber';
+      import { OrbitControls, Environment, PerspectiveCamera, Stars, Loader } from '@react-three/drei';
+      import { Bloom, EffectComposer, Noise, Vignette } from '@react-three/postprocessing';
+
+      // --- Constants ---
+      const COLORS = {
+        EMERALD: '#043927',
+        GOLD: '#D4AF37',
+        SOFT_GOLD: '#FFD700',
+        DEEP_GREEN: '#013220',
+        BACKGROUND: '#020805',
+      };
+
+      const PARTICLE_COUNT = 8000;
+      const BALL_COUNT = 150;
+      const BOX_COUNT = 60;
+      const STAR_COUNT = 400;
+      const LIGHT_STRIP_COUNT = 800;
+
+      const TREE_HEIGHT = 12;
+      const TREE_RADIUS = 5;
+      const SCATTER_RADIUS = 15;
+
+      const TreeMorphState = {
+        SCATTERED: 'SCATTERED',
+        TREE_SHAPE: 'TREE_SHAPE'
+      };
+
+      // --- Utils ---
+      const generateScatterPos = () => {
+        const r = SCATTER_RADIUS * Math.pow(Math.random(), 0.5);
+        const theta = Math.random() * 2 * Math.PI;
+        const phi = Math.acos(2 * Math.random() - 1);
+        return [
+          r * Math.sin(phi) * Math.cos(theta),
+          r * Math.sin(phi) * Math.sin(theta),
+          r * Math.cos(phi)
+        ];
+      };
+
+      const generateTreePos = (index, total) => {
+        const y = Math.random() * TREE_HEIGHT;
+        const ratio = (TREE_HEIGHT - y) / TREE_HEIGHT;
+        const currentRadius = ratio * TREE_RADIUS;
+        const theta = Math.random() * Math.PI * 2;
+        const r = currentRadius * Math.pow(Math.random(), 0.5);
+        return [
+          r * Math.cos(theta),
+          y - TREE_HEIGHT / 2,
+          r * Math.sin(theta)
+        ];
+      };
+
+      // --- Components ---
+
+      const TreeParticles = ({ state }) => {
+        const pointsRef = useRef();
+        const materialRef = useRef();
+
+        const [scatterPositions, treePositions, sizes, phases] = useMemo(() => {
+          const sPos = new Float32Array(PARTICLE_COUNT * 3);
+          const tPos = new Float32Array(PARTICLE_COUNT * 3);
+          const sz = new Float32Array(PARTICLE_COUNT);
+          const ph = new Float32Array(PARTICLE_COUNT);
+
+          for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const sp = generateScatterPos();
+            const tp = generateTreePos(i, PARTICLE_COUNT);
+            sPos.set(sp, i * 3);
+            tPos.set(tp, i * 3);
+            sz[i] = Math.random() * 0.15 + 0.05;
+            ph[i] = Math.random() * Math.PI * 2;
+          }
+          return [sPos, tPos, sz, ph];
+        }, []);
+
+        const uniforms = useMemo(() => ({
+          uTime: { value: 0 },
+          uMorphProgress: { value: 0 },
+          uColorEmerald: { value: new THREE.Color(COLORS.DEEP_GREEN) },
+          uColorGold: { value: new THREE.Color(COLORS.GOLD) },
+        }), []);
+
+        useFrame((stateFrame) => {
+          const time = stateFrame.clock.getElapsedTime();
+          if (materialRef.current) {
+            materialRef.current.uniforms.uTime.value = time;
+            const target = state === TreeMorphState.TREE_SHAPE ? 1 : 0;
+            materialRef.current.uniforms.uMorphProgress.value = THREE.MathUtils.lerp(
+              materialRef.current.uniforms.uMorphProgress.value,
+              target,
+              0.05
+            );
+          }
+        });
+
+        const vertexShader = `
+          uniform float uTime;
+          uniform float uMorphProgress;
+          attribute vec3 scatterPos;
+          attribute vec3 treePos;
+          attribute float phase;
+          attribute float size;
+          varying float vPhase;
+
+          void main() {
+            vPhase = phase;
+            vec3 pos = mix(scatterPos, treePos, uMorphProgress);
+            float offset = sin(uTime + phase) * 0.1;
+            pos.y += offset;
+            pos.x += cos(uTime * 0.5 + phase) * 0.05;
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+            gl_PointSize = size * (300.0 / -mvPosition.z);
+          }
+        `;
+
+        const fragmentShader = `
+          uniform vec3 uColorEmerald;
+          uniform vec3 uColorGold;
+          uniform float uTime;
+          varying float vPhase;
+
+          void main() {
+            float dist = distance(gl_PointCoord, vec2(0.5));
+            if (dist > 0.5) discard;
+            float sparkle = sin(uTime * 2.0 + vPhase) * 0.5 + 0.5;
+            vec3 color = mix(uColorEmerald, uColorGold, sparkle * 0.4);
+            float strength = 1.0 - (dist * 2.0);
+            strength = pow(strength, 1.5);
+            gl_FragColor = vec4(color, strength);
+          }
+        `;
+
+        return (
+          <points ref={pointsRef}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" count={PARTICLE_COUNT} array={scatterPositions} itemSize={3} />
+              <bufferAttribute attach="attributes-scatterPos" count={PARTICLE_COUNT} array={scatterPositions} itemSize={3} />
+              <bufferAttribute attach="attributes-treePos" count={PARTICLE_COUNT} array={treePositions} itemSize={3} />
+              <bufferAttribute attach="attributes-size" count={PARTICLE_COUNT} array={sizes} itemSize={1} />
+              <bufferAttribute attach="attributes-phase" count={PARTICLE_COUNT} array={phases} itemSize={1} />
+            </bufferGeometry>
+            <shaderMaterial
+              ref={materialRef}
+              vertexShader={vertexShader}
+              fragmentShader={fragmentShader}
+              uniforms={uniforms}
+              transparent
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </points>
+        );
+      };
+
+      const Ornaments = ({ state }) => {
+        const ballsRef = useRef();
+        const boxesRef = useRef();
+        const starsRef = useRef();
+        const lightsRef = useRef();
+        const morphProgress = useRef(0);
+
+        const ballData = useMemo(() => {
+          return Array.from({ length: BALL_COUNT }).map((_, i) => ({
+            sPos: new THREE.Vector3(...generateScatterPos()),
+            tPos: new THREE.Vector3(...generateTreePos(i, BALL_COUNT)),
+            color: i % 2 === 0 ? COLORS.GOLD : COLORS.SOFT_GOLD,
+            scale: 0.15 + Math.random() * 0.1,
+            phase: Math.random() * Math.PI * 2
+          }));
+        }, []);
+
+        const boxData = useMemo(() => {
+          const palette = ['#ff0000', '#ffd700', '#a020f0', '#00ff00', '#ff8c00', '#ff1493'];
+          return Array.from({ length: BOX_COUNT }).map((_, i) => {
+            const tpArr = generateTreePos(i, BOX_COUNT);
+            const treeY = tpArr[1];
+            const normalizedHeight = (treeY + TREE_HEIGHT / 2) / TREE_HEIGHT;
+            const heightScale = THREE.MathUtils.lerp(1.2, 0.4, normalizedHeight);
+            return {
+              sPos: new THREE.Vector3(...generateScatterPos()),
+              tPos: new THREE.Vector3(...tpArr),
+              color: palette[i % palette.length],
+              scale: (0.4 + Math.random() * 0.3) * heightScale,
+              phase: Math.random() * Math.PI * 2
+            };
+          });
+        }, []);
+
+        const starData = useMemo(() => {
+          return Array.from({ length: STAR_COUNT }).map((_, i) => ({
+            sPos: new THREE.Vector3(...generateScatterPos()),
+            tPos: new THREE.Vector3(...generateTreePos(i, STAR_COUNT)),
+            color: COLORS.SOFT_GOLD,
+            scale: 0.05 + Math.random() * 0.05,
+            phase: Math.random() * Math.PI * 2
+          }));
+        }, []);
+
+        const lightStripData = useMemo(() => {
+          const turns = 8;
+          return Array.from({ length: LIGHT_STRIP_COUNT }).map((_, i) => {
+            const t = i / LIGHT_STRIP_COUNT;
+            const angle = t * Math.PI * 2 * turns;
+            const radiusAtHeight = (1 - t) * TREE_RADIUS * 1.05;
+            const treeY = t * TREE_HEIGHT - TREE_HEIGHT / 2;
+            const tp = new THREE.Vector3(radiusAtHeight * Math.cos(angle), treeY, radiusAtHeight * Math.sin(angle));
+            return {
+              sPos: new THREE.Vector3(...generateScatterPos()),
+              tPos: tp,
+              scale: 0.06 + Math.random() * 0.04,
+              phase: Math.random() * Math.PI * 2,
+              color: i % 2 === 0 ? COLORS.SOFT_GOLD : '#ffffff'
+            };
+          });
+        }, []);
+
+        useEffect(() => {
+          if (boxesRef.current) {
+            const color = new THREE.Color();
+            boxData.forEach((data, i) => {
+              color.set(data.color);
+              boxesRef.current.setColorAt(i, color);
+            });
+            boxesRef.current.instanceColor.needsUpdate = true;
+          }
+          if (lightsRef.current) {
+            const color = new THREE.Color();
+            lightStripData.forEach((data, i) => {
+              color.set(data.color);
+              lightsRef.current.setColorAt(i, color);
+            });
+            lightsRef.current.instanceColor.needsUpdate = true;
+          }
+        }, [boxData, lightStripData]);
+
+        const dummy = useMemo(() => new THREE.Object3D(), []);
+
+        useFrame((stateFrame) => {
+          const time = stateFrame.clock.getElapsedTime();
+          const target = state === TreeMorphState.TREE_SHAPE ? 1 : 0;
+          morphProgress.current = THREE.MathUtils.lerp(morphProgress.current, target, 0.03);
+
+          if (ballsRef.current) {
+            ballData.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.sPos, data.tPos, morphProgress.current);
+              const floatY = Math.sin(time + data.phase) * 0.1;
+              dummy.position.set(pos.x, pos.y + floatY, pos.z);
+              dummy.scale.setScalar(data.scale);
+              dummy.rotation.set(time * 0.2 + data.phase, time * 0.1, 0);
+              dummy.updateMatrix();
+              ballsRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            ballsRef.current.instanceMatrix.needsUpdate = true;
+          }
+
+          if (boxesRef.current) {
+            boxData.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.sPos, data.tPos, morphProgress.current);
+              const floatY = Math.cos(time * 0.8 + data.phase) * 0.15;
+              dummy.position.set(pos.x, pos.y + floatY, pos.z);
+              dummy.scale.setScalar(data.scale);
+              dummy.rotation.set(data.phase * 0.5, time * 0.3 + data.phase, data.phase * 0.2);
+              dummy.updateMatrix();
+              boxesRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            boxesRef.current.instanceMatrix.needsUpdate = true;
+          }
+
+          if (starsRef.current) {
+            starData.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.sPos, data.tPos, morphProgress.current);
+              const twinkle = 0.5 + 0.5 * Math.sin(time * 3 + data.phase);
+              dummy.position.set(pos.x, pos.y, pos.z);
+              dummy.scale.setScalar(data.scale * (0.8 + twinkle * 0.4));
+              dummy.updateMatrix();
+              starsRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            starsRef.current.instanceMatrix.needsUpdate = true;
+          }
+
+          if (lightsRef.current) {
+            lightStripData.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.sPos, data.tPos, morphProgress.current);
+              const flash = Math.sin(time * 5 - i * 0.05) * 0.5 + 0.5;
+              dummy.position.set(pos.x, pos.y, pos.z);
+              dummy.scale.setScalar(data.scale * (0.5 + flash * 1.5));
+              dummy.updateMatrix();
+              lightsRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            lightsRef.current.instanceMatrix.needsUpdate = true;
+          }
+        });
+
+        return (
+          <React.Fragment>
+            <instancedMesh ref={ballsRef} args={[null, null, BALL_COUNT]}>
+              <sphereGeometry args={[1, 16, 16]} />
+              <meshStandardMaterial metalness={0.9} roughness={0.1} color={COLORS.GOLD} />
+            </instancedMesh>
+            <instancedMesh ref={boxesRef} args={[null, null, BOX_COUNT]}>
+              <boxGeometry args={[1, 1, 1]} />
+              <meshStandardMaterial metalness={0.2} roughness={0.4} />
+            </instancedMesh>
+            <instancedMesh ref={starsRef} args={[null, null, STAR_COUNT]}>
+              <sphereGeometry args={[0.5, 8, 8]} />
+              <meshStandardMaterial emissive={COLORS.SOFT_GOLD} emissiveIntensity={2} color={COLORS.SOFT_GOLD} />
+            </instancedMesh>
+            <instancedMesh ref={lightsRef} args={[null, null, LIGHT_STRIP_COUNT]}>
+              <sphereGeometry args={[0.5, 6, 6]} />
+              <meshStandardMaterial emissiveIntensity={5} toneMapped={false} />
+            </instancedMesh>
+          </React.Fragment>
+        );
+      };
+
+      const Experience = ({ state }) => {
+        return (
+          <React.Fragment>
+            <color attach="background" args={[COLORS.BACKGROUND]} />
+            <PerspectiveCamera makeDefault position={[0, 0, 20]} fov={50} />
+            <OrbitControls enablePan={false} minDistance={10} maxDistance={40} autoRotate={state === TreeMorphState.TREE_SHAPE} autoRotateSpeed={0.5} />
+            <ambientLight intensity={0.2} />
+            <spotLight position={[10, 20, 10]} angle={0.15} penumbra={1} intensity={2} color={COLORS.SOFT_GOLD} castShadow />
+            <pointLight position={[-10, -10, -10]} intensity={1} color={COLORS.EMERALD} />
+            <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+            <group>
+              <TreeParticles state={state} />
+              <Ornaments state={state} />
+            </group>
+            <Environment preset="night" />
+            <EffectComposer disableNormalPass>
+              <Bloom luminanceThreshold={0.8} mipmapBlur intensity={2.0} radius={0.7} />
+              <Noise opacity={0.05} />
+              <Vignette eskil={false} offset={0.1} darkness={1.1} />
+            </EffectComposer>
+          </React.Fragment>
+        );
+      };
+
+      const UI = ({ state, onToggle }) => {
+        const isTree = state === TreeMorphState.TREE_SHAPE;
+        return (
+          <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-8 md:p-12 text-white">
+            <div className={`transition-all duration-1000 flex flex-col items-center text-center ${isTree ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-10'}`}>
+              <h1 className="text-4xl md:text-7xl font-bold tracking-widest text-[#D4AF37] drop-shadow-[0_0_15px_rgba(212,175,55,0.6)]">MERRY CHRISTMAS</h1>
+              <p className="font-chinese mt-6 text-xl md:text-3xl font-light text-emerald-100/80 tracking-widest">愿易明珠新的一年里事事顺遂</p>
+            </div>
+            <div className="flex flex-col items-center gap-6">
+              <button onClick={onToggle} className="pointer-events-auto px-10 py-3 rounded-full border border-[#D4AF37] bg-[#043927]/30 backdrop-blur-md text-[#D4AF37] hover:bg-[#D4AF37] hover:text-black transition-all duration-500 font-bold tracking-widest text-lg uppercase">
+                {isTree ? '散落星空' : '凝聚圣诞'}
+              </button>
+              <div className="text-xs text-[#D4AF37]/50 tracking-[0.2em] uppercase">Interactive Christmas Experience • Emerald & Gold</div>
+            </div>
+          </div>
+        );
+      };
+
+      const App = () => {
+        const [state, setState] = useState(TreeMorphState.SCATTERED);
+        const toggleState = () => setState(prev => prev === TreeMorphState.SCATTERED ? TreeMorphState.TREE_SHAPE : TreeMorphState.SCATTERED);
+        return (
+          <div className="w-full h-screen relative bg-[#020805]">
+            <Suspense fallback={null}>
+              <Canvas shadows gl={{ antialias: true, powerPreference: "high-performance", alpha: false, stencil: false, depth: true }}>
+                <Experience state={state} />
+              </Canvas>
+            </Suspense>
+            <UI state={state} onToggle={toggleState} />
+            <Loader containerStyles={{ background: '#020805' }} innerStyles={{ width: '200px', height: '2px', background: '#043927' }} barStyles={{ background: '#D4AF37' }} dataStyles={{ color: '#D4AF37', fontFamily: 'Cinzel' }} />
+          </div>
+        );
+      };
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<React.StrictMode><App /></React.StrictMode>);
+    </script>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
